@@ -104,13 +104,22 @@ def get_or_build_tokenizer(config, ds, lang):
     return tokenizer
 
 def get_ds(config):
-    ds_raw = load_dataset('opus_books', f'{config["lang_src"]}-{config["lang_tgt"]}', split='train')
+    raw_data = load_en_lg_dataset(
+        "data/en-lg/en-lg.en",
+        "data/en-lg/en-lg.lg"
+    )
 
-    #build the tokenizer
+    # Mocking Hugging Face Dataset-like behavior with list
+    class SimpleDataset:
+        def __init__(self, data): self.data = data
+        def __getitem__(self, idx): return self.data[idx]
+        def __len__(self): return len(self.data)
+
+    ds_raw = SimpleDataset(raw_data)
+
     tokenizer_src = get_or_build_tokenizer(config, ds_raw, config["lang_src"])
-    tokenizer_tgt = get_or_build_tokenizer(config, ds_raw,config["lang_tgt"])
+    tokenizer_tgt = get_or_build_tokenizer(config, ds_raw, config["lang_tgt"])
 
-    # keep 90% of the training and 10% for validation
     train_ds_size = int(0.9 * len(ds_raw))
     val_ds_size = len(ds_raw) - train_ds_size
 
@@ -121,13 +130,12 @@ def get_ds(config):
 
     max_len_src = 0
     max_len_tgt = 0
-
     for item in ds_raw:
         src_ids = tokenizer_src.encode(item['translation'][config['lang_src']]).ids
-        tgt_ids = tokenizer_src.encode(item['translation'][config['lang_tgt']]).ids
+        tgt_ids = tokenizer_tgt.encode(item['translation'][config['lang_tgt']]).ids
         max_len_src = max(max_len_src, len(src_ids))
         max_len_tgt = max(max_len_tgt, len(tgt_ids))
-    
+
     print(f'Max length of the source sentence: {max_len_src}')
     print(f'Max length of the target sentence: {max_len_tgt}')
 
@@ -135,6 +143,22 @@ def get_ds(config):
     val_dataloader = DataLoader(val_ds, batch_size=1, shuffle=True)
 
     return train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt
+
+
+def load_en_lg_dataset(path_en, path_lg):
+    dataset = []
+    with open(path_en, encoding="utf-8") as f_en, open(path_lg, encoding="utf-8") as f_lg:
+        for line_en, line_lg in zip(f_en, f_lg):
+            line_en, line_lg = line_en.strip(), line_lg.strip()
+            if line_en and line_lg:
+                dataset.append({
+                    "translation": {
+                        "en": line_en,
+                        "lg": line_lg
+                    }
+                })
+    return dataset
+
 
 def get_model(config, vocab_src_len, vocab_tgt_len):
     model= build_transformer(vocab_src_len, vocab_tgt_len, config['seq_len'],config['seq_len'], config['d_model'])
@@ -215,9 +239,6 @@ if __name__ == '__main__':
 
     config = get_config()
     train_model(config)
-
-
-
 
 
 
