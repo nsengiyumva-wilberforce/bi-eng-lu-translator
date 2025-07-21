@@ -19,6 +19,8 @@ from pathlib import Path
 from tqdm import tqdm
 import warnings
 
+import pandas as pd
+
 def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_len, device):
     sos_idx = tokenizer_tgt.token_to_id('[SOS]')
     eos_idx = tokenizer_tgt.token_to_id('[EOS]')
@@ -103,13 +105,11 @@ def get_or_build_tokenizer(config, ds, lang):
 
     return tokenizer
 
+# 2. Updated get_ds function
 def get_ds(config):
-    raw_data = load_en_lg_dataset(
-        "data/en-lg/en-lg.en",
-        "data/en-lg/en-lg.lg"
-    )
+    raw_data = load_translation_csv(config["csv_path"])
 
-    # Mocking Hugging Face Dataset-like behavior with list
+    # Wrap in a simple Dataset-like class
     class SimpleDataset:
         def __init__(self, data): self.data = data
         def __getitem__(self, idx): return self.data[idx]
@@ -117,17 +117,22 @@ def get_ds(config):
 
     ds_raw = SimpleDataset(raw_data)
 
+    # Tokenizers
     tokenizer_src = get_or_build_tokenizer(config, ds_raw, config["lang_src"])
     tokenizer_tgt = get_or_build_tokenizer(config, ds_raw, config["lang_tgt"])
 
-    train_ds_size = int(0.9 * len(ds_raw))
-    val_ds_size = len(ds_raw) - train_ds_size
+    # Train-validation split
+    train_size = int(0.9 * len(ds_raw))
+    val_size = len(ds_raw) - train_size
+    train_ds_raw, val_ds_raw = random_split(ds_raw, [train_size, val_size])
 
-    train_ds_raw, val_ds_raw = random_split(ds_raw, [train_ds_size, val_ds_size])
+    # Dataset
+    train_ds = BilingualDataset(train_ds_raw, tokenizer_src, tokenizer_tgt,
+                                config['lang_src'], config['lang_tgt'], config['seq_len'])
+    val_ds = BilingualDataset(val_ds_raw, tokenizer_src, tokenizer_tgt,
+                              config['lang_src'], config['lang_tgt'], config['seq_len'])
 
-    train_ds = BilingualDataset(train_ds_raw, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
-    val_ds = BilingualDataset(val_ds_raw, tokenizer_src, tokenizer_tgt, config['lang_src'], config['lang_tgt'], config['seq_len'])
-
+    # Max token length (for reference)
     max_len_src = 0
     max_len_tgt = 0
     for item in ds_raw:
@@ -139,26 +144,28 @@ def get_ds(config):
     print(f'Max length of the source sentence: {max_len_src}')
     print(f'Max length of the target sentence: {max_len_tgt}')
 
+    # Dataloaders
     train_dataloader = DataLoader(train_ds, batch_size=config['batch_size'], shuffle=True)
     val_dataloader = DataLoader(val_ds, batch_size=1, shuffle=True)
 
     return train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt
 
+def load_translation_csv(csv_path):
+    df = pd.read_csv(csv_path, sep=',', encoding='latin-1')
 
-def load_en_lg_dataset(path_en, path_lg):
+    print("CSV Columns:", df.columns.tolist())  # Debug print
+
+    # tab-separated
     dataset = []
-    with open(path_en, encoding="utf-8") as f_en, open(path_lg, encoding="utf-8") as f_lg:
-        for line_en, line_lg in zip(f_en, f_lg):
-            line_en, line_lg = line_en.strip(), line_lg.strip()
-            if line_en and line_lg:
-                dataset.append({
-                    "translation": {
-                        "en": line_en,
-                        "lg": line_lg
-                    }
-                })
+    for _, row in df.iterrows():
+        if pd.notnull(row['English']) and pd.notnull(row['Luganda']):
+            dataset.append({
+                "translation": {
+                    "en": row['English'].strip(),
+                    "lg": row['Luganda'].strip()
+                }
+            })
     return dataset
-
 
 def get_model(config, vocab_src_len, vocab_tgt_len):
     model= build_transformer(vocab_src_len, vocab_tgt_len, config['seq_len'],config['seq_len'], config['d_model'])
