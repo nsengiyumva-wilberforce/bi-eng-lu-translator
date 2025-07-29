@@ -114,14 +114,6 @@ def get_or_build_tokenizer(config, ds, lang):
         )
         tokenizer.train_from_iterator(get_all_sentences(ds, lang), trainer=trainer)
         
-        # Add post-processing
-        tokenizer.post_processor = TemplateProcessing(
-            single="[SOS] $A [EOS]",
-            special_tokens=[
-                ("[SOS]", tokenizer.token_to_id("[SOS]")),
-                ("[EOS]", tokenizer.token_to_id("[EOS]")),
-            ]
-        )
         tokenizer.save(str(tokenizer_path))
     else:
         tokenizer = Tokenizer.from_file(str(tokenizer_path))
