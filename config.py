@@ -16,7 +16,11 @@ def get_config():
         "num_epochs": 100,
         "tokenizer_file": "tokenizer_{0}.json",
         "experiment_name": "runs/tmodel",
-        "vocab_size": 10000
+        "vocab_size": 10000,
+        "entity_weight": 2.0,            # Weight for entity tokens
+        "repetition_penalty": 1.5,       # Penalty for repeated tokens
+        "luganda_augment": True,         # Enable Luganda augmentation
+        "tf32_enabled": True,            # Enable TensorFloat-32
     }
 
 def get_weights_file_path(config, epoch: str):

@@ -4,7 +4,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset
 
 class BilingualDataset(Dataset):
-    def __init__(self, ds, tokenizer_src, tokenizer_tgt, src_lang, tgt_lang, seq_len) -> None:
+    def __init__(self, ds, tokenizer_src, tokenizer_tgt, src_lang, tgt_lang, seq_len, augment_fn=None) -> None:
         super().__init__()
         self.seq_len = seq_len
         self.ds = ds
@@ -12,6 +12,7 @@ class BilingualDataset(Dataset):
         self.tokenizer_tgt = tokenizer_tgt
         self.src_lang = src_lang
         self.tgt_lang = tgt_lang
+        self.augment_fn = augment_fn
 
         self.sos_token = torch.tensor([tokenizer_tgt.token_to_id("[SOS]")], dtype=torch.int64)
         self.eos_token = torch.tensor([tokenizer_tgt.token_to_id("[EOS]")], dtype=torch.int64)
@@ -24,6 +25,10 @@ class BilingualDataset(Dataset):
         src_target_pair = self.ds[index]
         src_text = src_target_pair['translation'][self.src_lang]
         tgt_text = src_target_pair['translation'][self.tgt_lang]
+
+        # Apply Luganda augmentation
+        if self.tgt_lang == 'lg' and self.augment_fn:
+            tgt_text = self.augment_fn(tgt_text)
 
         enc_input_tokens = self.tokenizer_src.encode(src_text).ids
         dec_input_tokens = self.tokenizer_tgt.encode(tgt_text).ids

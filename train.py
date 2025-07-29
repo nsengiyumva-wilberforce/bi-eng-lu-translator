@@ -24,33 +24,121 @@ import warnings
 
 import pandas as pd
 
+import random
 
-def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_len, device):
+
+# ======================
+# 1. REPETITION PENALTY
+# ======================
+def apply_repetition_penalty(logits, generated_tokens, penalty=1.5):
+    """Apply repetition penalty to logits"""
+    for token_id in set(generated_tokens):
+        logits[token_id] = logits[token_id] / penalty if logits[token_id] > 0 else logits[token_id] * penalty
+    return logits
+
+# ========================
+# 2. ENTITY-FOCUSED LOSS
+# ========================
+def create_entity_weights(labels, tokenizer, entity_weight=2.0):
+    """
+    Create weight tensor with higher weights for entity tokens
+    Simple heuristic: Capitalized words are considered entities
+    """
+    # Convert token IDs to text
+    tokens = [tokenizer.id_to_token(id.item()) for id in labels[0]]
+    text = " ".join(tokens)
+    
+    # Find entities using simple capitalization heuristic
+    entity_indices = []
+    for i, token in enumerate(tokens):
+        if token.istitle() and i != 0:  # Skip sentence-start tokens
+            entity_indices.append(i)
+    
+    # Create weights tensor
+    weights = torch.ones_like(labels, dtype=torch.float)
+    for idx in entity_indices:
+        weights[0, idx] = entity_weight
+        
+    return weights
+
+
+# ===============================
+# 4. LUGANDA MORPHOLOGICAL AUGMENT
+# ===============================
+def augment_luganda(text, aug_prob=0.3):
+    """
+    Apply morphological augmentations to Luganda text:
+    - Affix manipulation (add/remove prefixes/suffixes)
+    - Compound word splitting
+    """
+    if random.random() > aug_prob:
+        return text
+    
+    words = text.split()
+    augmented = []
+    
+    for word in words:
+        # Randomly add/remove prefixes (common Luganda prefixes)
+        prefixes = ['mu', 'ba', 'ki', 'bu', 'lu', 'wa', 'ka', 'gu']
+        if random.random() < 0.3 and len(word) > 3:
+            if random.random() < 0.5:  # Remove prefix
+                for prefix in prefixes:
+                    if word.startswith(prefix):
+                        word = word[len(prefix):]
+                        break
+            else:  # Add prefix
+                word = random.choice(prefixes) + word
+        
+        # Randomly add/remove suffixes
+        suffixes = ['a', 'e', 'o', 'mu', 'wa', 'ye', 'ko', 'wo']
+        if random.random() < 0.3 and len(word) > 3:
+            if random.random() < 0.5:  # Remove suffix
+                for suffix in suffixes:
+                    if word.endswith(suffix):
+                        word = word[:-len(suffix)]
+                        break
+            else:  # Add suffix
+                word = word + random.choice(suffixes)
+                
+        augmented.append(word)
+    
+    return " ".join(augmented)
+
+
+# =============================
+# MODIFIED GREEDY DECODE FUNCTION
+# =============================
+def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_len, device, repetition_penalty=1.5):
     sos_idx = tokenizer_tgt.token_to_id('[SOS]')
     eos_idx = tokenizer_tgt.token_to_id('[EOS]')
 
-    # Precompute the encoder output and reuse it for every step
     encoder_output = model.encode(source, source_mask)
-    # Initialize the decoder input with the sos token
     decoder_input = torch.empty(1, 1).fill_(sos_idx).type_as(source).to(device)
+    generated_tokens = []
+    
     while True:
         if decoder_input.size(1) == max_len:
             break
 
-        # build mask for target
         decoder_mask = casual_mask(decoder_input.size(1)).type_as(source_mask).to(device)
-
-        # calculate output
         out = model.decode(encoder_output, source_mask, decoder_input, decoder_mask)
-
-        # get next token
-        prob = model.project(out[:, -1])
-        _, next_word = torch.max(prob, dim=1)
+        logits = model.project(out[:, -1])
+        
+        # Apply repetition penalty
+        logits = logits.squeeze()
+        logits = apply_repetition_penalty(logits, generated_tokens, repetition_penalty)
+        
+        # Select next token
+        probs = torch.softmax(logits, dim=-1)
+        next_token = torch.argmax(probs).unsqueeze(0)
+        generated_tokens.append(next_token.item())
+        
         decoder_input = torch.cat(
-            [decoder_input, torch.empty(1, 1).type_as(source).fill_(next_word.item()).to(device)], dim=1
+            [decoder_input, torch.empty(1, 1).type_as(source).fill_(next_token.item()).to(device)], 
+            dim=1
         )
 
-        if next_word == eos_idx:
+        if next_token == eos_idx:
             break
 
     return decoder_input.squeeze(0)
@@ -121,7 +209,7 @@ def get_or_build_tokenizer(config, ds, lang):
     return tokenizer
 
 # 2. Updated get_ds function
-def get_ds(config):
+def get_ds(config, augment_fn=None):
     raw_data = load_translation_csv(config["csv_path"])
 
     # Wrap in a simple Dataset-like class
@@ -143,7 +231,7 @@ def get_ds(config):
 
     # Dataset
     train_ds = BilingualDataset(train_ds_raw, tokenizer_src, tokenizer_tgt,
-                                config['lang_src'], config['lang_tgt'], config['seq_len'])
+                                config['lang_src'], config['lang_tgt'], config['seq_len'], augment_fn=augment_fn)
     val_ds = BilingualDataset(val_ds_raw, tokenizer_src, tokenizer_tgt,
                               config['lang_src'], config['lang_tgt'], config['seq_len'])
 
@@ -187,6 +275,9 @@ def get_model(config, vocab_src_len, vocab_tgt_len):
     return model
 
 def train_model(config):
+    # Enable TensorFloat-32 for faster training
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
     #Define the device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -194,7 +285,12 @@ def train_model(config):
 
     Path(config['model_folder']).mkdir(parents=True, exist_ok=True)
 
-    train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt = get_ds(config)
+    # Add Luganda augmentation for target dataset
+    augment_fn = None
+    if config['luganda_augment']:
+        augment_fn = augment_luganda
+
+    train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt = get_ds(config, augment_fn)
     model = get_model(config, tokenizer_src.get_vocab_size(), tokenizer_tgt.get_vocab_size()).to(device)
 
     #Tensorboard
@@ -232,6 +328,15 @@ def train_model(config):
             label = batch['label'].to(device)
 
             loss = loss_fn(proj_ouput.view(-1, tokenizer_tgt.get_vocab_size()), label.view(-1))
+            # Entity-focused loss weighting
+            if config['entity_weight'] > 1.0:
+                entity_weights = create_entity_weights(
+                    label, 
+                    tokenizer_tgt, 
+                    entity_weight=config['entity_weight']
+                )
+                weighted_loss = (loss * entity_weights.view(-1)).mean()
+                loss = weighted_loss
             batch_iterator.set_postfix({f"loss": f"{loss.item():6.3f}"})
 
             writer.add_scalar('train loss', global_step)
@@ -260,4 +365,7 @@ if __name__ == '__main__':
     warnings.filterwarnings('ignore')
 
     config = get_config()
+        # Set TF32 precision if enabled
+    if config['tf32_enabled'] and torch.cuda.is_available():
+        torch.set_float32_matmul_precision('high')
     train_model(config)
