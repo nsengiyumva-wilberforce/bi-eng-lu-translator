@@ -309,8 +309,44 @@ def train_model(config):
 
         global_step = state['global_step']
 
-    loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer_src.token_to_id('[PAD]'), label_smoothing=0.1).to(device)
-
+        # Enhanced loss function with entity weighting
+        class EntityAwareLoss(nn.Module):
+            def __init__(self, ignore_index, label_smoothing=0.1, entity_weight=2.0):
+                super().__init__()
+                self.base_loss = nn.CrossEntropyLoss(
+                    ignore_index=ignore_index, 
+                    label_smoothing=label_smoothing,
+                    reduction='none'
+                )
+                self.entity_weight = entity_weight
+                self.ignore_index = ignore_index
+                
+            def forward(self, inputs, targets, tokenizer):
+                # Calculate base loss
+                losses = self.base_loss(inputs.view(-1, inputs.size(-1)), targets.view(-1))
+                
+                # Create weights tensor
+                weights = torch.ones_like(targets, dtype=torch.float)
+                
+                # Apply entity weights
+                for i in range(targets.size(0)):  # Loop through batch
+                    for j in range(targets.size(1)):  # Loop through sequence
+                        if targets[i, j] == self.ignore_index:
+                            continue
+                        token_id = targets[i, j].item()
+                        token = tokenizer.id_to_token(token_id)
+                        # Simple heuristic: proper nouns/capitalized words are entities
+                        if token and token[0].isupper() and j > 0:  # Skip first token
+                            weights[i, j] = self.entity_weight
+                
+                weights = weights.view(-1)
+                weighted_losses = losses * weights
+                return weighted_losses.mean()
+        loss_fn = EntityAwareLoss(
+                ignore_index=tokenizer_src.token_to_id('[PAD]'),
+                entity_weight=config['entity_weight']
+            ).to(device)
+        
     for epoch in range(initial_epoch, config['num_epochs']):
         batch_iterator = tqdm(train_dataloader, desc=f'Processing epoch {epoch:02d}')
         for batch in batch_iterator:

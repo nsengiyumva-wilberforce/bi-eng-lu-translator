@@ -18,7 +18,7 @@ def get_config():
         "experiment_name": "runs/tmodel",
         "vocab_size": 10000,
         "entity_weight": 2.0,            # Weight for entity tokens
-        "repetition_penalty": 1.5,       # Penalty for repeated tokens
+        "repetition_penalty": 2.0,       # Penalty for repeated tokens
         "luganda_augment": True,         # Enable Luganda augmentation
         "tf32_enabled": True,            # Enable TensorFloat-32
     }
