@@ -8,9 +8,12 @@ from config import get_weights_file_path, get_config
 
 from datasets import load_dataset
 from tokenizers import Tokenizer
+from tokenizers.processors import TemplateProcessing
 from tokenizers.models import WordLevel
 from tokenizers.trainers import WordLevelTrainer
 from tokenizers.pre_tokenizers import Whitespace
+from tokenizers.pre_tokenizers import Sequence, Whitespace, Punctuation
+from tokenizers.normalizers import Lowercase
 
 from torch.utils.tensorboard import SummaryWriter
 
@@ -93,16 +96,35 @@ def get_all_sentences(ds, lang):
 
 def get_or_build_tokenizer(config, ds, lang):
     tokenizer_path = Path(config['tokenizer_file'].format(lang))
-    if not Path.exists(tokenizer_path):
-        tokenizer = Tokenizer(WordLevel(unk_token='[UNK]'))
-        tokenizer.pre_tokenizer = Whitespace()
-        trainer = WordLevelTrainer(special_tokens = ["[UNK]", "[PAD]", "[SOS]", "[EOS]"], min_frequency=2)
+    if not tokenizer_path.exists():
+        # Initialize tokenizer
+        tokenizer = Tokenizer(WordLevel(unk_token="[UNK]"))
+        
+        # Normalize to lowercase
+        tokenizer.normalizer = Lowercase()
+        
+        # Split on whitespace + punctuation
+        tokenizer.pre_tokenizer = Sequence([Whitespace(), Punctuation()])
+        
+        # Train with vocabulary limits
+        trainer = WordLevelTrainer(
+            special_tokens=["[UNK]", "[PAD]", "[SOS]", "[EOS]"],
+            min_frequency=2,
+            vocab_size=10000  # Adjust as needed
+        )
         tokenizer.train_from_iterator(get_all_sentences(ds, lang), trainer=trainer)
+        
+        # Add post-processing
+        tokenizer.post_processor = TemplateProcessing(
+            single="[SOS] $A [EOS]",
+            special_tokens=[
+                ("[SOS]", tokenizer.token_to_id("[SOS]")),
+                ("[EOS]", tokenizer.token_to_id("[EOS]")),
+            ]
+        )
         tokenizer.save(str(tokenizer_path))
-
     else:
         tokenizer = Tokenizer.from_file(str(tokenizer_path))
-
     return tokenizer
 
 # 2. Updated get_ds function
