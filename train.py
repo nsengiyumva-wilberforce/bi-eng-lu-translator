@@ -24,6 +24,7 @@ import warnings
 
 import pandas as pd
 
+
 def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_len, device):
     sos_idx = tokenizer_tgt.token_to_id('[SOS]')
     eos_idx = tokenizer_tgt.token_to_id('[EOS]')
@@ -110,7 +111,7 @@ def get_or_build_tokenizer(config, ds, lang):
         trainer = WordLevelTrainer(
             special_tokens=["[UNK]", "[PAD]", "[SOS]", "[EOS]"],
             min_frequency=2,
-            vocab_size=10000  # Adjust as needed
+            vocab_size= config['vocab_size'],
         )
         tokenizer.train_from_iterator(get_all_sentences(ds, lang), trainer=trainer)
         

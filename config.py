@@ -15,7 +15,8 @@ def get_config():
         "preload": None,
         "num_epochs": 100,
         "tokenizer_file": "tokenizer_{0}.json",
-        "experiment_name": "runs/tmodel"
+        "experiment_name": "runs/tmodel",
+        "vocab_size": 10000
     }
 
 def get_weights_file_path(config, epoch: str):
