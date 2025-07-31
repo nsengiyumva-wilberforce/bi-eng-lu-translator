@@ -40,69 +40,70 @@ def apply_repetition_penalty(logits, generated_tokens, penalty=1.5):
 # 2. ENTITY-FOCUSED LOSS
 # ========================
 def create_entity_weights(labels, tokenizer, entity_weight=2.0):
+    """
+    Create weight tensor with higher weights for entity tokens
+    Simple heuristic: Capitalized words are considered entities
+    """
+    # Convert token IDs to text
     tokens = [tokenizer.id_to_token(id.item()) for id in labels[0]]
-    weights = torch.ones_like(labels, dtype=torch.float)
+    text = " ".join(tokens)
     
-    # Detect entities using POS heuristics + capitalization
+    # Find entities using simple capitalization heuristic
+    entity_indices = []
     for i, token in enumerate(tokens):
-        # Skip special tokens and sentence start
-        if token in ['[SOS]', '[EOS]', '[PAD]', '[UNK]'] or i == 0:
-            continue
-            
-        # Detect proper nouns (capitalized in mid-sentence)
-        prev_token = tokens[i-1] if i > 0 else ""
-        if token.istitle() and prev_token not in ['.', '!', '?']:
-            weights[0, i] = entity_weight
-            
-        # Detect Luganda noun prefixes
-        elif token.startswith(('omu', 'aba', 'eki', 'obu', 'olu', 'aka')):
-            weights[0, i] = entity_weight * 1.3  # Higher weight for Luganda morphology
-            
+        if token.istitle() and i != 0:  # Skip sentence-start tokens
+            entity_indices.append(i)
+    
+    # Create weights tensor
+    weights = torch.ones_like(labels, dtype=torch.float)
+    for idx in entity_indices:
+        weights[0, idx] = entity_weight
+        
     return weights
 
 
 # ===============================
 # 4. LUGANDA MORPHOLOGICAL AUGMENT
 # ===============================
-def augment_luganda(text, aug_prob=0.4):
-    words = text.split()
-    if len(words) < 3 or random.random() > aug_prob:
+def augment_luganda(text, aug_prob=0.3):
+    """
+    Apply morphological augmentations to Luganda text:
+    - Affix manipulation (add/remove prefixes/suffixes)
+    - Compound word splitting
+    """
+    if random.random() > aug_prob:
         return text
-
-    # Common Luganda affix patterns
-    prefixes = ['mu', 'ba', 'ki', 'bu', 'lu', 'wa', 'ka', 'gu', 'n', 'm']
-    suffixes = ['a', 'e', 'o', 'mu', 'wa', 'ye', 'ko', 'wo', 'la', 'ra']
-
-    # Affix manipulation with context awareness
-    for i in range(len(words)):
-        # Handle prefixes - 40% chance per word
-        if random.random() < 0.4:
-            # Remove existing prefix
-            for p in prefixes:
-                if words[i].startswith(p) and len(words[i]) > len(p)+2:
-                    words[i] = words[i][len(p):]
-                    break
-            # Or add new prefix
-        elif random.random() < 0.6:
-                words[i] = random.choice(prefixes) + words[i]
-
-        # Suffix handling - 30% chance
-        if random.random() < 0.3:
-            for s in suffixes:
-                if words[i].endswith(s) and len(words[i]) > len(s)+2:
-                    words[i] = words[i][:-len(s)]
-                    break
-        elif random.random() < 0.5:
-                words[i] = words[i] + random.choice(suffixes)
-
-    # Compound word splitting (20% chance)
-    if random.random() < 0.2:
-        for i in range(len(words)):
-            if len(words[i]) > 8:
-                split_point = random.randint(3, len(words[i])-3)
-                words[i] = words[i][:split_point] + ' ' + words[i][split_point:]
-
-    return " ".join(words)
+    
+    words = text.split()
+    augmented = []
+    
+    for word in words:
+        # Randomly add/remove prefixes (common Luganda prefixes)
+        prefixes = ['mu', 'ba', 'ki', 'bu', 'lu', 'wa', 'ka', 'gu']
+        if random.random() < 0.3 and len(word) > 3:
+            if random.random() < 0.5:  # Remove prefix
+                for prefix in prefixes:
+                    if word.startswith(prefix):
+                        word = word[len(prefix):]
+                        break
+            else:  # Add prefix
+                word = random.choice(prefixes) + word
+        
+        # Randomly add/remove suffixes
+        suffixes = ['a', 'e', 'o', 'mu', 'wa', 'ye', 'ko', 'wo']
+        if random.random() < 0.3 and len(word) > 3:
+            if random.random() < 0.5:  # Remove suffix
+                for suffix in suffixes:
+                    if word.endswith(suffix):
+                        word = word[:-len(suffix)]
+                        break
+            else:  # Add suffix
+                word = word + random.choice(suffixes)
+                
+        augmented.append(word)
+    
+    return " ".join(augmented)
+    
 
 
 # =============================
@@ -338,13 +339,11 @@ def train_model(config):
                 loss = weighted_loss
             batch_iterator.set_postfix({f"loss": f"{loss.item():6.3f}"})
 
-            writer.add_scalar('train loss', loss.item(), global_step)
+            writer.add_scalar('train loss', global_step)
             writer.flush()
 
             # Backpropagate the loss
             loss.backward()
-
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
             # Update the weight
             optimizer.step()
