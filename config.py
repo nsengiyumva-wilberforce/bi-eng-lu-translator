@@ -7,21 +7,17 @@ def get_config():
         "lr": 10**-4,
         "seq_len": 64,
         "d_model": 512,
-        'num_layers': 6,
-        'num_heads': 8,
-        'dropout': 0.1,
         "csv_path": "data/en-lg/en-lg.csv",
         "lang_src": "en",
         "lang_tgt": "lg",
         "model_folder": "weights",
         "model_basename": "tmodel_",
         "preload": None,
-        "num_epochs": 50,
+        "num_epochs": 100,
         "tokenizer_file": "tokenizer_{0}.json",
         "experiment_name": "runs/tmodel",
         "vocab_size": 10000,
-        "entity_weight": 2.5, 
-        'beam_width': 5,           # Weight for entity tokens
+        "entity_weight": 2.0,            # Weight for entity tokens
         "repetition_penalty": 2.0,       # Penalty for repeated tokens
         "luganda_augment": True,         # Enable Luganda augmentation
         "tf32_enabled": True,            # Enable TensorFloat-32
