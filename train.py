@@ -26,9 +26,6 @@ import pandas as pd
 
 import random
 
-import torch.nn.functional as F
-
-
 
 # ======================
 # 1. REPETITION PENALTY
@@ -111,47 +108,40 @@ def augment_luganda(text, aug_prob=0.4):
 # =============================
 # MODIFIED GREEDY DECODE FUNCTION
 # =============================
-def beam_search_decode(model, source, source_mask, tokenizer_tgt, max_len, device, beam_width=5, repetition_penalty=1.5):
+def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_len, device, repetition_penalty=1.5):
     sos_idx = tokenizer_tgt.token_to_id('[SOS]')
     eos_idx = tokenizer_tgt.token_to_id('[EOS]')
-    
+
     encoder_output = model.encode(source, source_mask)
+    decoder_input = torch.empty(1, 1).fill_(sos_idx).type_as(source).to(device)
+    generated_tokens = []
     
-    # Initialize beams (log_prob, sequence)
-    beams = [(0.0, [sos_idx])]
-    
-    for _ in range(max_len):
-        new_beams = []
-        for log_prob, seq in beams:
-            if seq[-1] == eos_idx:
-                new_beams.append((log_prob, seq))
-                continue
-                
-            decoder_input = torch.tensor([seq], device=device)
-            decoder_mask = casual_mask(decoder_input.size(1)).to(device)
-            
-            out = model.decode(encoder_output, source_mask, decoder_input, decoder_mask)
-            logits = model.project(out[:, -1])
-            
-            # Apply repetition penalty
-            logits = apply_repetition_penalty(logits.squeeze(), seq, repetition_penalty)
-            probs = F.log_softmax(logits, dim=-1)
-            
-            top_probs, top_indices = torch.topk(probs, beam_width)
-            for i in range(beam_width):
-                new_seq = seq + [top_indices[i].item()]
-                new_log_prob = log_prob + top_probs[i].item()
-                new_beams.append((new_log_prob, new_seq))
-        
-        # Select top-k beams
-        beams = sorted(new_beams, key=lambda x: x[0], reverse=True)[:beam_width]
-        
-        # Early stopping if all beams ended
-        if all(seq[-1] == eos_idx for _, seq in beams):
+    while True:
+        if decoder_input.size(1) == max_len:
             break
-            
-    # Return best sequence (without SOS token)
-    return torch.tensor(beams[0][1][1:])
+
+        decoder_mask = casual_mask(decoder_input.size(1)).type_as(source_mask).to(device)
+        out = model.decode(encoder_output, source_mask, decoder_input, decoder_mask)
+        logits = model.project(out[:, -1])
+        
+        # Apply repetition penalty
+        logits = logits.squeeze()
+        logits = apply_repetition_penalty(logits, generated_tokens, repetition_penalty)
+        
+        # Select next token
+        probs = torch.softmax(logits, dim=-1)
+        next_token = torch.argmax(probs).unsqueeze(0)
+        generated_tokens.append(next_token.item())
+        
+        decoder_input = torch.cat(
+            [decoder_input, torch.empty(1, 1).type_as(source).fill_(next_token.item()).to(device)], 
+            dim=1
+        )
+
+        if next_token == eos_idx:
+            break
+
+    return decoder_input.squeeze(0)
 
     
 def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, device, print_msg, global_state, writer, num_examples=2):
@@ -167,16 +157,7 @@ def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, 
             encoder_mask = batch['encoder_mask'].to(device)
 
             assert encoder_input.size(0) == 1, "Batch size must be 1 for validation"
-            model_out = beam_search_decode(
-                model, 
-                encoder_input, 
-                encoder_mask, 
-                tokenizer_tgt, 
-                max_len, 
-                device,
-                beam_width=5,
-                repetition_penalty=1.5
-            )
+            model_out = greedy_decode(model, encoder_input, encoder_mask, tokenizer_src, tokenizer_tgt, max_len,device)
             source_text = batch['src_text'][0]
             target_text = batch['tgt_text'][0]
 
@@ -317,14 +298,6 @@ def train_model(config):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], eps=1e-9)
 
-        # After optimizer initialization
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=config['lr'],
-        steps_per_epoch=len(train_dataloader),
-        epochs=config['num_epochs']
-    )
-
     initial_epoch = 0
     global_step = 0
     if config['preload']:
@@ -376,8 +349,6 @@ def train_model(config):
             # Update the weight
             optimizer.step()
             optimizer.zero_grad()
-            # Inside training loop after optimizer.step()
-            scheduler.step()
             global_step += 1
         run_validation(model, val_dataloader, tokenizer_src,tokenizer_tgt, config['seq_len'], device, lambda msg: batch_iterator.write(msg), global_step, writer)
  
