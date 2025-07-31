@@ -26,6 +26,9 @@ import pandas as pd
 
 import random
 
+import torch.nn.functional as F
+
+
 
 # ======================
 # 1. REPETITION PENALTY
@@ -40,108 +43,115 @@ def apply_repetition_penalty(logits, generated_tokens, penalty=1.5):
 # 2. ENTITY-FOCUSED LOSS
 # ========================
 def create_entity_weights(labels, tokenizer, entity_weight=2.0):
-    """
-    Create weight tensor with higher weights for entity tokens
-    Simple heuristic: Capitalized words are considered entities
-    """
-    # Convert token IDs to text
     tokens = [tokenizer.id_to_token(id.item()) for id in labels[0]]
-    text = " ".join(tokens)
-    
-    # Find entities using simple capitalization heuristic
-    entity_indices = []
-    for i, token in enumerate(tokens):
-        if token.istitle() and i != 0:  # Skip sentence-start tokens
-            entity_indices.append(i)
-    
-    # Create weights tensor
     weights = torch.ones_like(labels, dtype=torch.float)
-    for idx in entity_indices:
-        weights[0, idx] = entity_weight
-        
+    
+    # Detect entities using POS heuristics + capitalization
+    for i, token in enumerate(tokens):
+        # Skip special tokens and sentence start
+        if token in ['[SOS]', '[EOS]', '[PAD]', '[UNK]'] or i == 0:
+            continue
+            
+        # Detect proper nouns (capitalized in mid-sentence)
+        prev_token = tokens[i-1] if i > 0 else ""
+        if token.istitle() and prev_token not in ['.', '!', '?']:
+            weights[0, i] = entity_weight
+            
+        # Detect Luganda noun prefixes
+        elif token.startswith(('omu', 'aba', 'eki', 'obu', 'olu', 'aka')):
+            weights[0, i] = entity_weight * 1.3  # Higher weight for Luganda morphology
+            
     return weights
 
 
 # ===============================
 # 4. LUGANDA MORPHOLOGICAL AUGMENT
 # ===============================
-def augment_luganda(text, aug_prob=0.3):
-    """
-    Apply morphological augmentations to Luganda text:
-    - Affix manipulation (add/remove prefixes/suffixes)
-    - Compound word splitting
-    """
-    if random.random() > aug_prob:
-        return text
-    
+def augment_luganda(text, aug_prob=0.4):
     words = text.split()
-    augmented = []
-    
-    for word in words:
-        # Randomly add/remove prefixes (common Luganda prefixes)
-        prefixes = ['mu', 'ba', 'ki', 'bu', 'lu', 'wa', 'ka', 'gu']
-        if random.random() < 0.3 and len(word) > 3:
-            if random.random() < 0.5:  # Remove prefix
-                for prefix in prefixes:
-                    if word.startswith(prefix):
-                        word = word[len(prefix):]
-                        break
-            else:  # Add prefix
-                word = random.choice(prefixes) + word
-        
-        # Randomly add/remove suffixes
-        suffixes = ['a', 'e', 'o', 'mu', 'wa', 'ye', 'ko', 'wo']
-        if random.random() < 0.3 and len(word) > 3:
-            if random.random() < 0.5:  # Remove suffix
-                for suffix in suffixes:
-                    if word.endswith(suffix):
-                        word = word[:-len(suffix)]
-                        break
-            else:  # Add suffix
-                word = word + random.choice(suffixes)
-                
-        augmented.append(word)
-    
-    return " ".join(augmented)
+    if len(words) < 3 or random.random() > aug_prob:
+        return text
+
+    # Common Luganda affix patterns
+    prefixes = ['mu', 'ba', 'ki', 'bu', 'lu', 'wa', 'ka', 'gu', 'n', 'm']
+    suffixes = ['a', 'e', 'o', 'mu', 'wa', 'ye', 'ko', 'wo', 'la', 'ra']
+
+    # Affix manipulation with context awareness
+    for i in range(len(words)):
+        # Handle prefixes - 40% chance per word
+        if random.random() < 0.4:
+            # Remove existing prefix
+            for p in prefixes:
+                if words[i].startswith(p) and len(words[i]) > len(p)+2:
+                    words[i] = words[i][len(p):]
+                    break
+            # Or add new prefix
+        elif random.random() < 0.6:
+                words[i] = random.choice(prefixes) + words[i]
+
+        # Suffix handling - 30% chance
+        if random.random() < 0.3:
+            for s in suffixes:
+                if words[i].endswith(s) and len(words[i]) > len(s)+2:
+                    words[i] = words[i][:-len(s)]
+                    break
+        elif random.random() < 0.5:
+                words[i] = words[i] + random.choice(suffixes)
+
+    # Compound word splitting (20% chance)
+    if random.random() < 0.2:
+        for i in range(len(words)):
+            if len(words[i]) > 8:
+                split_point = random.randint(3, len(words[i])-3)
+                words[i] = words[i][:split_point] + ' ' + words[i][split_point:]
+
+    return " ".join(words)
 
 
 # =============================
 # MODIFIED GREEDY DECODE FUNCTION
 # =============================
-def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_len, device, repetition_penalty=1.5):
+def beam_search_decode(model, source, source_mask, tokenizer_tgt, max_len, device, beam_width=5, repetition_penalty=1.5):
     sos_idx = tokenizer_tgt.token_to_id('[SOS]')
     eos_idx = tokenizer_tgt.token_to_id('[EOS]')
-
-    encoder_output = model.encode(source, source_mask)
-    decoder_input = torch.empty(1, 1).fill_(sos_idx).type_as(source).to(device)
-    generated_tokens = []
     
-    while True:
-        if decoder_input.size(1) == max_len:
+    encoder_output = model.encode(source, source_mask)
+    
+    # Initialize beams (log_prob, sequence)
+    beams = [(0.0, [sos_idx])]
+    
+    for _ in range(max_len):
+        new_beams = []
+        for log_prob, seq in beams:
+            if seq[-1] == eos_idx:
+                new_beams.append((log_prob, seq))
+                continue
+                
+            decoder_input = torch.tensor([seq], device=device)
+            decoder_mask = casual_mask(decoder_input.size(1)).to(device)
+            
+            out = model.decode(encoder_output, source_mask, decoder_input, decoder_mask)
+            logits = model.project(out[:, -1])
+            
+            # Apply repetition penalty
+            logits = apply_repetition_penalty(logits.squeeze(), seq, repetition_penalty)
+            probs = F.log_softmax(logits, dim=-1)
+            
+            top_probs, top_indices = torch.topk(probs, beam_width)
+            for i in range(beam_width):
+                new_seq = seq + [top_indices[i].item()]
+                new_log_prob = log_prob + top_probs[i].item()
+                new_beams.append((new_log_prob, new_seq))
+        
+        # Select top-k beams
+        beams = sorted(new_beams, key=lambda x: x[0], reverse=True)[:beam_width]
+        
+        # Early stopping if all beams ended
+        if all(seq[-1] == eos_idx for _, seq in beams):
             break
-
-        decoder_mask = casual_mask(decoder_input.size(1)).type_as(source_mask).to(device)
-        out = model.decode(encoder_output, source_mask, decoder_input, decoder_mask)
-        logits = model.project(out[:, -1])
-        
-        # Apply repetition penalty
-        logits = logits.squeeze()
-        logits = apply_repetition_penalty(logits, generated_tokens, repetition_penalty)
-        
-        # Select next token
-        probs = torch.softmax(logits, dim=-1)
-        next_token = torch.argmax(probs).unsqueeze(0)
-        generated_tokens.append(next_token.item())
-        
-        decoder_input = torch.cat(
-            [decoder_input, torch.empty(1, 1).type_as(source).fill_(next_token.item()).to(device)], 
-            dim=1
-        )
-
-        if next_token == eos_idx:
-            break
-
-    return decoder_input.squeeze(0)
+            
+    # Return best sequence (without SOS token)
+    return torch.tensor(beams[0][1][1:])
 
     
 def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, device, print_msg, global_state, writer, num_examples=2):
@@ -157,7 +167,16 @@ def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, 
             encoder_mask = batch['encoder_mask'].to(device)
 
             assert encoder_input.size(0) == 1, "Batch size must be 1 for validation"
-            model_out = greedy_decode(model, encoder_input, encoder_mask, tokenizer_src, tokenizer_tgt, max_len,device)
+            model_out = beam_search_decode(
+                model, 
+                encoder_input, 
+                encoder_mask, 
+                tokenizer_tgt, 
+                max_len, 
+                device,
+                beam_width=5,
+                repetition_penalty=1.5
+            )
             source_text = batch['src_text'][0]
             target_text = batch['tgt_text'][0]
 
@@ -298,6 +317,14 @@ def train_model(config):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], eps=1e-9)
 
+        # After optimizer initialization
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=config['lr'],
+        steps_per_epoch=len(train_dataloader),
+        epochs=config['num_epochs']
+    )
+
     initial_epoch = 0
     global_step = 0
     if config['preload']:
@@ -338,15 +365,19 @@ def train_model(config):
                 loss = weighted_loss
             batch_iterator.set_postfix({f"loss": f"{loss.item():6.3f}"})
 
-            writer.add_scalar('train loss', global_step)
+            writer.add_scalar('train loss', loss.item(), global_step)
             writer.flush()
 
             # Backpropagate the loss
             loss.backward()
 
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
             # Update the weight
             optimizer.step()
             optimizer.zero_grad()
+            # Inside training loop after optimizer.step()
+            scheduler.step()
             global_step += 1
         run_validation(model, val_dataloader, tokenizer_src,tokenizer_tgt, config['seq_len'], device, lambda msg: batch_iterator.write(msg), global_step, writer)
  
